@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"time"
 )
 
 // throttler copies lines from an input to an output, dropping any that
@@ -18,9 +17,9 @@ type throttler struct {
 	dropped int64
 }
 
-func newThrottler(clock Clock, count int64, period time.Duration, stdout, stderr io.Writer) *throttler {
+func newThrottler(cfg config, clock Clock, stdout, stderr io.Writer) *throttler {
 	return &throttler{
-		bucket: newBucket(clock, count, period, count),
+		bucket: newBucket(clock, cfg.count, cfg.period, cfg.burst),
 		out:    bufio.NewWriter(stdout),
 		notes:  stderr,
 	}
