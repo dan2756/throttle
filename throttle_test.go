@@ -1,0 +1,220 @@
+package main
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+	"time"
+)
+
+// harness drives a throttler with a fake clock the way pump does, without
+// goroutines or real timers.
+type harness struct {
+	t     *testing.T
+	clock *fakeClock
+	th    *throttler
+	out   bytes.Buffer
+	notes bytes.Buffer
+}
+
+func newHarness(t *testing.T, args ...string) *harness {
+	t.Helper()
+	cfg, err := parseArgs(args)
+	if err != nil {
+		t.Fatalf("parseArgs(%q): %v", args, err)
+	}
+	h := &harness{t: t, clock: newFakeClock()}
+	h.th = newThrottler(cfg, h.clock, &h.out, &h.notes)
+	return h
+}
+
+func (h *harness) feed(lines ...string) {
+	h.t.Helper()
+	for _, l := range lines {
+		if err := h.th.Line([]byte(l + "\n")); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+}
+
+// advance moves the clock forward by d, stopping at each deadline on the
+// way to run Tick, just as the real loop would.
+func (h *harness) advance(d time.Duration) {
+	h.t.Helper()
+	target := h.clock.Now().Add(d)
+	for range 100000 {
+		at, ok := h.th.Deadline()
+		if !ok || at.After(target) {
+			h.clock.now = target
+			return
+		}
+		if at.After(h.clock.now) {
+			h.clock.now = at
+		}
+		if err := h.th.Tick(); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	h.t.Fatal("deadline never moved past the target time")
+}
+
+func (h *harness) finish() {
+	h.t.Helper()
+	if err := h.th.Finish(); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) wantOut(want string) {
+	h.t.Helper()
+	if got := h.out.String(); got != want {
+		h.t.Errorf("stdout:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func (h *harness) wantNotes(want string) {
+	h.t.Helper()
+	if got := h.notes.String(); got != want {
+		h.t.Errorf("stderr:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func lines(s ...string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return strings.Join(s, "\n") + "\n"
+}
+
+func TestDropsAreSummarizedPerWindow(t *testing.T) {
+	h := newHarness(t, "3")
+	h.feed("a", "b", "c", "d", "e")
+	h.wantOut(lines("a", "b", "c"))
+	h.wantNotes("")
+
+	h.advance(59 * time.Second)
+	h.wantNotes("")
+	h.advance(time.Second)
+	h.wantNotes(lines("[throttle] dropped 2 lines in the last 1m"))
+
+	// Nothing dropped in the next window, so nothing more is said.
+	h.advance(time.Minute)
+	h.wantNotes(lines("[throttle] dropped 2 lines in the last 1m"))
+}
+
+func TestSummaryUsesThePeriodAsWindow(t *testing.T) {
+	h := newHarness(t, "2/10s")
+	for range 1206 {
+		h.feed("x")
+	}
+	h.advance(10 * time.Second)
+	h.wantNotes(lines("[throttle] dropped 1,204 lines in the last 10s"))
+}
+
+func TestQuietWindowsAreSilent(t *testing.T) {
+	h := newHarness(t, "10")
+	h.feed("a", "b")
+	if _, ok := h.th.Deadline(); ok {
+		t.Error("deadline set although nothing was dropped")
+	}
+	h.advance(5 * time.Minute)
+	h.finish()
+	h.wantOut(lines("a", "b"))
+	h.wantNotes("")
+}
+
+func TestSummaryToStdoutIsInline(t *testing.T) {
+	h := newHarness(t, "3", "--summary", "stdout")
+	h.feed("a", "b", "c", "d", "e")
+	h.advance(time.Minute)
+	h.feed("f")
+	h.wantOut(lines("a", "b", "c", "[throttle] dropped 2 lines in the last 1m", "f"))
+	h.wantNotes("")
+}
+
+func TestNoSummary(t *testing.T) {
+	h := newHarness(t, "1", "--no-summary")
+	h.feed("a", "b", "c")
+	h.advance(time.Minute)
+	h.finish()
+	h.wantOut(lines("a"))
+	h.wantNotes("")
+}
+
+func TestKeepLastEmitsNewestDroppedLine(t *testing.T) {
+	h := newHarness(t, "2", "--keep-last", "--summary", "stdout")
+	h.feed("a", "b", "c", "d", "e")
+	h.wantOut(lines("a", "b"))
+	h.advance(time.Minute)
+	// The kept line no longer counts as dropped.
+	h.wantOut(lines("a", "b", "[throttle] dropped 2 lines in the last 1m", "e"))
+}
+
+func TestKeepLastSkipsLineWhenANewerOnePassed(t *testing.T) {
+	h := newHarness(t, "2", "--keep-last") // one token every 30s
+	h.feed("a", "b", "c")
+	h.advance(30 * time.Second)
+	h.feed("d")
+	h.advance(30 * time.Second)
+	h.wantOut(lines("a", "b", "d"))
+	h.wantNotes(lines("[throttle] dropped 1 line in the last 1m"))
+}
+
+func TestKeepLastAloneIsNotADrop(t *testing.T) {
+	h := newHarness(t, "1", "--keep-last")
+	h.feed("a", "b")
+	h.advance(time.Minute)
+	h.finish()
+	h.wantOut(lines("a", "b"))
+	h.wantNotes("")
+}
+
+func TestWindowsStayAlignedAfterLateTick(t *testing.T) {
+	h := newHarness(t, "1")
+	start := h.clock.Now()
+	h.feed("a")
+	h.clock.Advance(30 * time.Second)
+	h.feed("b")
+	if at, _ := h.th.Deadline(); !at.Equal(start.Add(time.Minute)) {
+		t.Fatalf("deadline %v, want start+1m", at.Sub(start))
+	}
+
+	// The tick for the first window runs very late.
+	h.clock.Advance(100 * time.Second)
+	if err := h.th.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	h.wantNotes(lines("[throttle] dropped 1 line in the last 1m"))
+
+	h.feed("c", "d")
+	if at, _ := h.th.Deadline(); !at.Equal(start.Add(3 * time.Minute)) {
+		t.Errorf("deadline %v, want start+3m", at.Sub(start))
+	}
+}
+
+func TestFinishReportsTotal(t *testing.T) {
+	h := newHarness(t, "2")
+	for range 10 {
+		h.feed("x")
+	}
+	h.advance(time.Minute)
+	for range 5 {
+		h.feed("y")
+	}
+	h.advance(30 * time.Second)
+	h.finish()
+	h.wantOut(lines("x", "x", "y", "y"))
+	h.wantNotes(lines(
+		"[throttle] dropped 8 lines in the last 1m",
+		"[throttle] total: dropped 11 of 15 lines over 1m30s",
+	))
+}
+
+func TestFinishEmitsKeptLine(t *testing.T) {
+	h := newHarness(t, "1", "--keep-last")
+	h.feed("a", "b", "c")
+	h.clock.Advance(2 * time.Second)
+	h.finish()
+	h.wantOut(lines("a", "c"))
+	h.wantNotes(lines("[throttle] total: dropped 1 of 3 lines over 2s"))
+}

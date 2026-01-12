@@ -10,12 +10,13 @@ import (
 	"time"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 const usage = `Usage: throttle [flags] RATE
 
 Copy lines from stdin to stdout, letting at most RATE through and dropping
-the rest.
+the rest. At the end of each period in which lines were dropped, a summary
+is written to stderr, and a final total is written when input ends.
 
 RATE is COUNT or COUNT/PERIOD:
   30          30 lines per minute
@@ -26,20 +27,34 @@ Flags:
   --per PERIOD    period for a bare COUNT (default 1m)
   --burst N       lines that may pass at once after a quiet spell
                   (default COUNT)
+  --summary DEST  where summaries go: stderr or stdout (default stderr)
+  --no-summary    don't report dropped lines
+  --keep-last     at the end of each period, emit the newest line if it
+                  was dropped
   -h, --help      show this help
   --version       print the version and exit
 
 Examples:
   tail -f app.log | throttle 30
-  journalctl -f | throttle 5/s
+  journalctl -f | throttle 5/s --keep-last
   ./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
 `
 
+type summaryMode int
+
+const (
+	summaryStderr summaryMode = iota
+	summaryStdout
+	summaryOff
+)
+
 // config is the parsed command line.
 type config struct {
-	count  int64
-	period time.Duration
-	burst  int64
+	count    int64
+	period   time.Duration
+	burst    int64
+	summary  summaryMode
+	keepLast bool
 
 	showVersion bool
 }
@@ -63,7 +78,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	t := newThrottler(cfg, realClock{}, stdout, stderr)
-	if err := t.Run(stdin); err != nil {
+	err = pump(t, stdin)
+	if ferr := t.Finish(); err == nil {
+		err = ferr
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "throttle: %v\n", err)
 		return 1
 	}
@@ -73,14 +92,19 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // parseArgs parses the command line. Flags may appear before or after RATE.
 func parseArgs(args []string) (config, error) {
 	var (
-		cfg   config
-		per   string
-		burst int64
+		cfg       config
+		per       string
+		burst     int64
+		summary   string
+		noSummary bool
 	)
 	fs := flag.NewFlagSet("throttle", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&per, "per", "", "")
 	fs.Int64Var(&burst, "burst", 0, "")
+	fs.StringVar(&summary, "summary", "stderr", "")
+	fs.BoolVar(&noSummary, "no-summary", false, "")
+	fs.BoolVar(&cfg.keepLast, "keep-last", false, "")
 	fs.BoolVar(&cfg.showVersion, "version", false, "")
 
 	// The flag package stops at the first non-flag argument, so peel off
@@ -136,6 +160,18 @@ func parseArgs(args []string) (config, error) {
 			return cfg, errors.New("--burst must be at least 1")
 		}
 		cfg.burst = burst
+	}
+
+	switch summary {
+	case "stderr":
+		cfg.summary = summaryStderr
+	case "stdout":
+		cfg.summary = summaryStdout
+	default:
+		return cfg, fmt.Errorf("--summary must be stderr or stdout, not %q", summary)
+	}
+	if noSummary {
+		cfg.summary = summaryOff
 	}
 	return cfg, nil
 }

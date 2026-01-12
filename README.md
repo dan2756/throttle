@@ -36,6 +36,9 @@ duration (`1h30m`).
 | ---------------- | --------------------------------------------------------------- |
 | `--per PERIOD`   | Period for a bare count (default `1m`).                         |
 | `--burst N`      | Lines that may pass at once after a quiet spell (default: the count). |
+| `--summary DEST` | Where summaries go: `stderr` (default) or `stdout` (inline with the lines). |
+| `--no-summary`   | Don't report dropped lines at all.                              |
+| `--keep-last`    | At the end of each period, emit the newest line if it was dropped. |
 | `-h`, `--help`   | Show help.                                                      |
 | `--version`      | Print the version.                                              |
 
@@ -49,14 +52,41 @@ full; each line that passes spends one, and tokens come back at the rate
 stream that has been quiet can let a full period's worth of lines through at
 once, then settles to the steady rate.
 
-When input ends, the number of dropped lines is reported on stderr.
+### Summaries
+
+Dropped lines are not silently lost. At the end of each period in which
+something was dropped, `throttle` says how much:
+
+```
+[throttle] dropped 1,204 lines in the last 1m
+```
+
+Periods are counted from when `throttle` started, so for `5/s` the summary
+comes at most once a second and for `100/10m` at most once every ten
+minutes. When input ends, a total follows if anything was dropped:
+
+```
+[throttle] total: dropped 3,204 of 5,004 lines over 12m4s
+```
+
+Summaries go to stderr so they never mix with the data, unless you ask for
+`--summary stdout`, which is handy when the output is a terminal or a file
+you'll read later.
+
+### Keeping the newest line
+
+With `--keep-last`, if the most recent line in a period was dropped, it is
+emitted when the period ends (right after the summary), and once more at end
+of input. A progress line or a "still failing" message is never left
+hidden behind the limit. A kept line doesn't count as dropped.
 
 ## Examples
 
 ```
 tail -f app.log | throttle 30
-journalctl -f | throttle 5/s
+journalctl -f | throttle 5/s --keep-last
 ./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
+kubectl logs -f deploy/api | throttle 60 --summary stdout > api.log
 ```
 
 ## License
