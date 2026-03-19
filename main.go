@@ -10,13 +10,14 @@ import (
 	"time"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 const usage = `Usage: throttle [flags] RATE
 
 Copy lines from stdin to stdout, letting at most RATE through and dropping
-the rest. At the end of each period in which lines were dropped, a summary
-is written to stderr, and a final total is written when input ends.
+the rest (or, with --delay, holding them back). At the end of each period in
+which lines were dropped, a summary is written to stderr, and a final total
+is written when input ends.
 
 RATE is COUNT or COUNT/PERIOD:
   30          30 lines per minute
@@ -26,11 +27,15 @@ RATE is COUNT or COUNT/PERIOD:
 Flags:
   --per PERIOD    period for a bare COUNT (default 1m)
   --burst N       lines that may pass at once after a quiet spell
-                  (default COUNT)
+                  (default COUNT, or 1 with --delay)
   --summary DEST  where summaries go: stderr or stdout (default stderr)
   --no-summary    don't report dropped lines
   --keep-last     at the end of each period, emit the newest line if it
                   was dropped
+  --delay         don't drop: queue lines and release them evenly at RATE
+  --buffer N      with --delay, the most lines to queue; when it is full
+                  the oldest queued line is dropped (default 10000, 0 = no
+                  limit)
   -h, --help      show this help
   --version       print the version and exit
 
@@ -38,7 +43,10 @@ Examples:
   tail -f app.log | throttle 30
   journalctl -f | throttle 5/s --keep-last
   ./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
+  ./replay-events | throttle --delay 50/s | ./slow-consumer
 `
+
+const defaultBuffer = 10000
 
 type summaryMode int
 
@@ -55,6 +63,8 @@ type config struct {
 	burst    int64
 	summary  summaryMode
 	keepLast bool
+	delay    bool
+	buffer   int
 
 	showVersion bool
 }
@@ -105,6 +115,8 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&summary, "summary", "stderr", "")
 	fs.BoolVar(&noSummary, "no-summary", false, "")
 	fs.BoolVar(&cfg.keepLast, "keep-last", false, "")
+	fs.BoolVar(&cfg.delay, "delay", false, "")
+	fs.IntVar(&cfg.buffer, "buffer", defaultBuffer, "")
 	fs.BoolVar(&cfg.showVersion, "version", false, "")
 
 	// The flag package stops at the first non-flag argument, so peel off
@@ -155,6 +167,9 @@ func parseArgs(args []string) (config, error) {
 	cfg.count, cfg.period = count, period
 
 	cfg.burst = count
+	if cfg.delay {
+		cfg.burst = 1 // pace evenly unless asked otherwise
+	}
 	if set["burst"] {
 		if burst < 1 {
 			return cfg, errors.New("--burst must be at least 1")
@@ -172,6 +187,17 @@ func parseArgs(args []string) (config, error) {
 	}
 	if noSummary {
 		cfg.summary = summaryOff
+	}
+
+	if cfg.delay {
+		if cfg.keepLast {
+			return cfg, errors.New("--keep-last can't be used with --delay")
+		}
+		if cfg.buffer < 0 {
+			return cfg, errors.New("--buffer must be 0 or more")
+		}
+	} else if set["buffer"] {
+		return cfg, errors.New("--buffer only applies with --delay")
 	}
 	return cfg, nil
 }

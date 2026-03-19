@@ -44,11 +44,13 @@ func (s *lineSource) read(r io.Reader) {
 // stop releases the reader goroutine if it is blocked handing over a line.
 func (s *lineSource) stop() { close(s.done) }
 
-// pump feeds lines from r through t until the input ends, running t's
-// Tick whenever its deadline passes.
+// pump feeds lines from r through t, running t's Tick whenever its
+// deadline passes. It returns once the input has ended and every queued
+// line has been released.
 func pump(t *throttler, r io.Reader) error {
 	src := readLines(r)
 	defer src.stop()
+	in := src.lines
 
 	var (
 		timer *time.Timer
@@ -61,6 +63,10 @@ func pump(t *throttler, r io.Reader) error {
 	}()
 
 	for {
+		if in == nil && t.Queued() == 0 {
+			return nil
+		}
+
 		var wake <-chan time.Time
 		if at, ok := t.Deadline(); ok {
 			if !at.Equal(armed) {
@@ -76,9 +82,13 @@ func pump(t *throttler, r io.Reader) error {
 		}
 
 		select {
-		case line, ok := <-src.lines:
+		case line, ok := <-in:
 			if !ok {
-				return src.err
+				if src.err != nil {
+					return src.err
+				}
+				in = nil // keep going until the queue drains
+				continue
 			}
 			if err := t.Line(line); err != nil {
 				return err

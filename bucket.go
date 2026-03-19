@@ -56,3 +56,12 @@ func (b *bucket) Allow() bool {
 	b.tokens--
 	return true
 }
+
+// Wait reports how long until a token is available; zero if one is now.
+func (b *bucket) Wait() time.Duration {
+	b.refill()
+	if b.tokens > 0 {
+		return 0
+	}
+	return b.interval - b.accrued
+}

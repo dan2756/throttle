@@ -22,6 +22,7 @@ type throttler struct {
 	windowStart time.Time
 	windowDrops int64
 	lastDropped []byte // the newest line, if it was dropped (--keep-last only)
+	queue       queue  // lines waiting to be released (--delay only)
 
 	seen    int64
 	dropped int64
@@ -52,36 +53,77 @@ func (t *throttler) Line(line []byte) error {
 		return err
 	}
 	t.seen++
+	if t.cfg.delay {
+		return t.enqueue(line)
+	}
 	if t.bucket.Allow() {
 		t.lastDropped = nil
 		return t.emit(line)
 	}
-	t.windowDrops++
-	t.dropped++
+	t.drop()
 	if t.cfg.keepLast {
 		t.lastDropped = line
 	}
 	return nil
 }
 
-// Deadline reports when Tick next needs to run. ok is false when nothing
-// is waiting on the clock.
-func (t *throttler) Deadline() (at time.Time, ok bool) {
-	if t.windowDrops == 0 {
-		return time.Time{}, false
+// enqueue adds a line to the --delay queue, making room by dropping the
+// oldest queued line if the buffer is full, then releases what it can.
+func (t *throttler) enqueue(line []byte) error {
+	t.queue.push(line)
+	if t.cfg.buffer > 0 && t.queue.len() > t.cfg.buffer {
+		t.queue.pop()
+		t.drop()
 	}
-	return t.windowStart.Add(t.cfg.period), true
+	return t.release()
 }
 
-// Tick brings the throttler up to the current time, closing the summary
-// window if it has ended.
+// release emits queued lines for as long as the bucket has tokens.
+func (t *throttler) release() error {
+	for t.queue.len() > 0 && t.bucket.Allow() {
+		if err := t.emit(t.queue.pop()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Queued reports how many lines are waiting to be released.
+func (t *throttler) Queued() int {
+	return t.queue.len()
+}
+
+// Deadline reports when Tick next needs to run: the end of the current
+// window if it has drops to report, or the time the next queued line may
+// go out, whichever is sooner. ok is false when nothing is waiting on the
+// clock.
+func (t *throttler) Deadline() (at time.Time, ok bool) {
+	if t.windowDrops > 0 {
+		at, ok = t.windowStart.Add(t.cfg.period), true
+	}
+	if t.queue.len() > 0 {
+		next := t.clock.Now().Add(t.bucket.Wait())
+		if !ok || next.Before(at) {
+			at, ok = next, true
+		}
+	}
+	return at, ok
+}
+
+// Tick brings the throttler up to the current time: it closes the summary
+// window if it has ended and releases queued lines that are due.
 func (t *throttler) Tick() error {
 	return t.advance()
 }
 
 // Finish emits any line held for --keep-last and reports the totals. Call
-// it once, after the last line.
+// it once, after the last line. Lines still queued for --delay at this
+// point are discarded and counted as dropped.
 func (t *throttler) Finish() error {
+	if n := t.queue.len(); n > 0 {
+		t.dropped += int64(n)
+		t.queue = queue{}
+	}
 	if line := t.takeLast(); line != nil {
 		if err := t.emit(line); err != nil {
 			return err
@@ -96,13 +138,14 @@ func (t *throttler) Finish() error {
 }
 
 func (t *throttler) advance() error {
-	elapsed := t.clock.Now().Sub(t.windowStart)
-	if elapsed < t.cfg.period {
-		return nil
+	if elapsed := t.clock.Now().Sub(t.windowStart); elapsed >= t.cfg.period {
+		// Keep windows aligned to the start time even when a tick runs late.
+		t.windowStart = t.windowStart.Add(elapsed - elapsed%t.cfg.period)
+		if err := t.closeWindow(); err != nil {
+			return err
+		}
 	}
-	// Keep windows aligned to the start time even when a tick runs late.
-	t.windowStart = t.windowStart.Add(elapsed - elapsed%t.cfg.period)
-	return t.closeWindow()
+	return t.release()
 }
 
 // closeWindow reports the drops of the window that just ended. With
@@ -118,6 +161,11 @@ func (t *throttler) closeWindow() error {
 		return t.emit(kept)
 	}
 	return t.out.Flush()
+}
+
+func (t *throttler) drop() {
+	t.windowDrops++
+	t.dropped++
 }
 
 // takeLast returns the line held for --keep-last, if any. Once emitted it

@@ -218,3 +218,83 @@ func TestFinishEmitsKeptLine(t *testing.T) {
 	h.wantOut(lines("a", "c"))
 	h.wantNotes(lines("[throttle] total: dropped 1 of 3 lines over 2s"))
 }
+
+func TestDelayPacesLinesEvenly(t *testing.T) {
+	h := newHarness(t, "--delay", "2/s") // one line every 500ms
+	h.feed("a", "b", "c", "d")
+	h.wantOut(lines("a"))
+	if h.th.Queued() != 3 {
+		t.Fatalf("queued %d, want 3", h.th.Queued())
+	}
+	h.advance(499 * time.Millisecond)
+	h.wantOut(lines("a"))
+	h.advance(time.Millisecond)
+	h.wantOut(lines("a", "b"))
+	h.advance(time.Second)
+	h.wantOut(lines("a", "b", "c", "d"))
+	if _, ok := h.th.Deadline(); ok {
+		t.Error("deadline still set with an empty queue")
+	}
+
+	// After a quiet spell the next line goes straight out.
+	h.advance(10 * time.Second)
+	h.feed("e")
+	h.wantOut(lines("a", "b", "c", "d", "e"))
+	h.finish()
+	h.wantNotes("")
+}
+
+func TestDelayQueuedLinesKeepOrderBehindNewOnes(t *testing.T) {
+	h := newHarness(t, "--delay", "1/s")
+	h.feed("a", "b")
+	h.advance(1500 * time.Millisecond)
+	h.feed("c")
+	h.advance(500 * time.Millisecond)
+	h.wantOut(lines("a", "b", "c"))
+}
+
+func TestDelayHonorsExplicitBurst(t *testing.T) {
+	h := newHarness(t, "--delay", "1/s", "--burst", "3")
+	h.feed("a", "b", "c", "d", "e")
+	h.wantOut(lines("a", "b", "c"))
+	h.advance(2 * time.Second)
+	h.wantOut(lines("a", "b", "c", "d", "e"))
+}
+
+func TestDelayBufferDropsOldest(t *testing.T) {
+	h := newHarness(t, "--delay", "1/s", "--buffer", "2")
+	h.feed("a", "b", "c", "d", "e")
+	h.wantOut(lines("a")) // b and c were pushed out by d and e
+	h.advance(2 * time.Second)
+	h.wantOut(lines("a", "d", "e"))
+	h.wantNotes(lines("[throttle] dropped 2 lines in the last 1s"))
+	h.finish()
+	h.wantNotes(lines(
+		"[throttle] dropped 2 lines in the last 1s",
+		"[throttle] total: dropped 2 of 5 lines over 2s",
+	))
+}
+
+func TestDelayUnlimitedBuffer(t *testing.T) {
+	h := newHarness(t, "--delay", "1000/s", "--buffer", "0")
+	for range 50000 {
+		h.feed("x")
+	}
+	if h.th.Queued() != 49999 {
+		t.Fatalf("queued %d, want 49999", h.th.Queued())
+	}
+	h.advance(50 * time.Second)
+	if h.th.Queued() != 0 || h.out.Len() != 100000 {
+		t.Errorf("queued %d, wrote %d bytes", h.th.Queued(), h.out.Len())
+	}
+	h.wantNotes("")
+}
+
+func TestFinishCountsQueuedLinesAsDropped(t *testing.T) {
+	h := newHarness(t, "--delay", "1/m")
+	h.feed("a", "b", "c")
+	h.clock.Advance(5 * time.Second)
+	h.finish()
+	h.wantOut(lines("a"))
+	h.wantNotes(lines("[throttle] total: dropped 2 of 3 lines over 5s"))
+}

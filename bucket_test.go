@@ -101,3 +101,26 @@ func TestBucketUnevenInterval(t *testing.T) {
 		t.Fatalf("3/s over 3s: got %d, want 9", passed)
 	}
 }
+
+func TestBucketWait(t *testing.T) {
+	clock := newFakeClock()
+	b := newBucket(clock, 2, time.Second, 1) // one token every 500ms
+	if w := b.Wait(); w != 0 {
+		t.Fatalf("full bucket: Wait() = %v, want 0", w)
+	}
+	b.Allow()
+	if w := b.Wait(); w != 500*time.Millisecond {
+		t.Fatalf("empty bucket: Wait() = %v, want 500ms", w)
+	}
+	clock.Advance(200 * time.Millisecond)
+	if w := b.Wait(); w != 300*time.Millisecond {
+		t.Fatalf("after 200ms: Wait() = %v, want 300ms", w)
+	}
+	clock.Advance(300 * time.Millisecond)
+	if w := b.Wait(); w != 0 {
+		t.Fatalf("after a full interval: Wait() = %v, want 0", w)
+	}
+	if b.tokens != 1 {
+		t.Fatalf("Wait spent or lost a token: tokens = %d", b.tokens)
+	}
+}

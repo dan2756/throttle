@@ -28,6 +28,8 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"30", "--burst", "5"}, 30, time.Minute, 5},
 		{[]string{"-burst=100", "30"}, 30, time.Minute, 100},
 		{[]string{"30", "--no-summary", "--keep-last"}, 30, time.Minute, 30},
+		{[]string{"--delay", "10/s"}, 10, time.Second, 1},
+		{[]string{"--delay", "10/s", "--burst", "4", "--buffer", "0"}, 10, time.Second, 4},
 	}
 	for _, tt := range tests {
 		cfg, err := parseArgs(tt.args)
@@ -55,6 +57,9 @@ func TestParseArgsErrors(t *testing.T) {
 		{[]string{"30", "--burst", "lots"}, "invalid value"},
 		{[]string{"--frobnicate", "30"}, "flag provided but not defined"},
 		{[]string{"2000000000/s"}, "too fast"},
+		{[]string{"30", "--buffer", "50"}, "--buffer only applies with --delay"},
+		{[]string{"30", "--delay", "--buffer", "-1"}, "--buffer must be 0 or more"},
+		{[]string{"30", "--delay", "--keep-last"}, "--keep-last can't be used with --delay"},
 	}
 	for _, tt := range tests {
 		_, err := parseArgs(tt.args)
@@ -142,6 +147,20 @@ func TestEndToEndLongLines(t *testing.T) {
 	}
 	if out != long1+"\n"+long2+"\n" {
 		t.Errorf("long lines not passed intact (got %d bytes)", len(out))
+	}
+}
+
+func TestEndToEndDelay(t *testing.T) {
+	in := numbered(5)
+	start := time.Now()
+	out, errOut, code := runThrottle(t, strings.NewReader(in), "--delay", "200/s")
+	elapsed := time.Since(start)
+	if code != 0 || out != in || errOut != "" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+	// Five lines paced 5ms apart can't all be out in under 20ms.
+	if elapsed < 20*time.Millisecond {
+		t.Errorf("finished in %v; lines were not paced", elapsed)
 	}
 }
 

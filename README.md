@@ -3,8 +3,10 @@
 Limits output to N lines per minute.
 
 Pipe a noisy stream through `throttle` and at most N lines per minute come
-out the other side; the rest are dropped. Handy for chatty logs, runaway
-debug output, or anything you want to watch without drowning in it.
+out the other side; the rest are dropped, and you're told how many. Or, with
+`--delay`, nothing is dropped and lines are paced out evenly instead. Handy
+for chatty logs, runaway debug output, replaying events into something slow,
+or anything you want to watch without drowning in it.
 
 ## Install
 
@@ -35,10 +37,12 @@ duration (`1h30m`).
 | Flag             | Description                                                     |
 | ---------------- | --------------------------------------------------------------- |
 | `--per PERIOD`   | Period for a bare count (default `1m`).                         |
-| `--burst N`      | Lines that may pass at once after a quiet spell (default: the count). |
+| `--burst N`      | Lines that may pass at once after a quiet spell (default: the count, or 1 with `--delay`). |
 | `--summary DEST` | Where summaries go: `stderr` (default) or `stdout` (inline with the lines). |
 | `--no-summary`   | Don't report dropped lines at all.                              |
 | `--keep-last`    | At the end of each period, emit the newest line if it was dropped. |
+| `--delay`        | Don't drop; queue lines and release them evenly at the rate.    |
+| `--buffer N`     | With `--delay`, the most lines to queue (default 10000, `0` = no limit). |
 | `-h`, `--help`   | Show help.                                                      |
 | `--version`      | Print the version.                                              |
 
@@ -76,9 +80,23 @@ you'll read later.
 ### Keeping the newest line
 
 With `--keep-last`, if the most recent line in a period was dropped, it is
-emitted when the period ends (right after the summary), and once more at end
-of input. A progress line or a "still failing" message is never left
-hidden behind the limit. A kept line doesn't count as dropped.
+emitted when the period ends (right after the summary), or when input ends.
+A progress line or a "still failing" message is never left hidden behind
+the limit. A kept line doesn't count as dropped.
+
+### Delay mode
+
+`--delay` trades dropping for waiting: every line is queued and released at
+the rate, evenly spaced (`--delay 10/s` writes one line every 100ms). The
+burst defaults to 1 here so the spacing holds even after a quiet spell; pass
+`--burst` to allow a quick start.
+
+The queue holds at most `--buffer` lines. If input keeps arriving faster than
+the rate and the queue fills up, the oldest queued line is dropped to make
+room, so the output stays as current as it can; those drops are summarized
+like any others. Use `--buffer 0` to queue without limit, for example when
+replaying a file whose every line must come out. When input ends,
+`throttle` keeps going until the queue is empty.
 
 ## Examples
 
@@ -87,6 +105,7 @@ tail -f app.log | throttle 30
 journalctl -f | throttle 5/s --keep-last
 ./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
 kubectl logs -f deploy/api | throttle 60 --summary stdout > api.log
+./replay-events < events.jsonl | throttle --delay 50/s --buffer 0 | ./slow-consumer
 ```
 
 ## License
