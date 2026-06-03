@@ -29,6 +29,7 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"-burst=100", "30"}, 30, time.Minute, 100},
 		{[]string{"30", "--no-summary", "--keep-last"}, 30, time.Minute, 30},
 		{[]string{"--delay", "10/s"}, 10, time.Second, 1},
+		{[]string{"5/s", "--sample", "10", "--keep-last"}, 5, time.Second, 5},
 		{[]string{"--delay", "10/s", "--burst", "4", "--buffer", "0"}, 10, time.Second, 4},
 	}
 	for _, tt := range tests {
@@ -60,6 +61,9 @@ func TestParseArgsErrors(t *testing.T) {
 		{[]string{"30", "--buffer", "50"}, "--buffer only applies with --delay"},
 		{[]string{"30", "--delay", "--buffer", "-1"}, "--buffer must be 0 or more"},
 		{[]string{"30", "--delay", "--keep-last"}, "--keep-last can't be used with --delay"},
+		{[]string{"30", "--sample", "1"}, "--sample must be at least 2"},
+		{[]string{"30", "--sample", "0"}, "--sample must be at least 2"},
+		{[]string{"30", "--delay", "--sample", "4"}, "--sample can't be used with --delay"},
 	}
 	for _, tt := range tests {
 		_, err := parseArgs(tt.args)
@@ -147,6 +151,21 @@ func TestEndToEndLongLines(t *testing.T) {
 	}
 	if out != long1+"\n"+long2+"\n" {
 		t.Errorf("long lines not passed intact (got %d bytes)", len(out))
+	}
+}
+
+func TestEndToEndSample(t *testing.T) {
+	out, errOut, code := runThrottle(t, strings.NewReader(numbered(100)), "10", "--sample", "10")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	// 1-10 fit the burst; of the 90 lines over the rate, every 10th passes.
+	want := numbered(10) + "20\n30\n40\n50\n60\n70\n80\n90\n100\n"
+	if out != want {
+		t.Errorf("stdout %q, want %q", out, want)
+	}
+	if m := totalRE.FindStringSubmatch(errOut); m == nil || m[1] != "81" {
+		t.Errorf("stderr %q, want 81 dropped", errOut)
 	}
 }
 

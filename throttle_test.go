@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -297,4 +298,31 @@ func TestFinishCountsQueuedLinesAsDropped(t *testing.T) {
 	h.finish()
 	h.wantOut(lines("a"))
 	h.wantNotes(lines("[throttle] total: dropped 2 of 3 lines over 5s"))
+}
+
+func TestSamplePassesEveryKthOverRateLine(t *testing.T) {
+	h := newHarness(t, "2", "--sample", "3")
+	for i := 1; i <= 11; i++ {
+		h.feed(strconv.Itoa(i))
+	}
+	h.wantOut(lines("1", "2", "5", "8", "11"))
+	h.advance(time.Minute)
+	h.wantNotes(lines("[throttle] dropped 6 lines in the last 1m"))
+}
+
+func TestSampleCountCarriesAcrossWindows(t *testing.T) {
+	h := newHarness(t, "1", "--sample", "2")
+	h.feed("a", "b", "c")
+	h.advance(time.Minute)
+	h.feed("d", "e", "f")
+	h.wantOut(lines("a", "c", "d", "f"))
+}
+
+func TestSampleWithKeepLast(t *testing.T) {
+	h := newHarness(t, "1", "--sample", "2", "--keep-last")
+	h.feed("a", "b", "c", "d")
+	h.advance(time.Minute)
+	// b is simply dropped; c is sampled; d is dropped, then kept.
+	h.wantOut(lines("a", "c", "d"))
+	h.wantNotes(lines("[throttle] dropped 1 line in the last 1m"))
 }

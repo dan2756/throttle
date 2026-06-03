@@ -41,6 +41,7 @@ duration (`1h30m`).
 | `--summary DEST` | Where summaries go: `stderr` (default) or `stdout` (inline with the lines). |
 | `--no-summary`   | Don't report dropped lines at all.                              |
 | `--keep-last`    | At the end of each period, emit the newest line if it was dropped. |
+| `--sample K`     | When over the rate, let every Kth line through instead of dropping it. |
 | `--delay`        | Don't drop; queue lines and release them evenly at the rate.    |
 | `--buffer N`     | With `--delay`, the most lines to queue (default 10000, `0` = no limit). |
 | `-h`, `--help`   | Show help.                                                      |
@@ -84,6 +85,16 @@ emitted when the period ends (right after the summary), or when input ends.
 A progress line or a "still failing" message is never left hidden behind
 the limit. A kept line doesn't count as dropped.
 
+### Sampling
+
+Dropping everything over the limit means a long flood is represented only by
+its first few lines. `--sample K` keeps a thin slice of the rest: once the
+bucket is empty, every Kth line still gets through. With `throttle 100/s
+--sample 50`, a stream of 10,000 lines a second comes out at about
+100 + 9,900 / 50 ≈ 300 lines a second, spread across the whole flood. The
+count of over-rate lines carries on from one period to the next, so a
+steady overload is sampled steadily. Sampled lines don't count as dropped.
+
 ### Delay mode
 
 `--delay` trades dropping for waiting: every line is queued and released at
@@ -105,6 +116,7 @@ tail -f app.log | throttle 30
 journalctl -f | throttle 5/s --keep-last
 ./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
 kubectl logs -f deploy/api | throttle 60 --summary stdout > api.log
+./load-test 2>&1 | throttle 100/s --sample 50
 ./replay-events < events.jsonl | throttle --delay 50/s --buffer 0 | ./slow-consumer
 ```
 

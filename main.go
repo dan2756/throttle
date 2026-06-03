@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const version = "0.4.0"
+const version = "0.5.0"
 
 const usage = `Usage: throttle [flags] RATE
 
@@ -32,6 +32,8 @@ Flags:
   --no-summary    don't report dropped lines
   --keep-last     at the end of each period, emit the newest line if it
                   was dropped
+  --sample K      when over the rate, let every Kth line through instead
+                  of dropping it
   --delay         don't drop: queue lines and release them evenly at RATE
   --buffer N      with --delay, the most lines to queue; when it is full
                   the oldest queued line is dropped (default 10000, 0 = no
@@ -42,6 +44,7 @@ Flags:
 Examples:
   tail -f app.log | throttle 30
   journalctl -f | throttle 5/s --keep-last
+  ./load-test | throttle 100/s --sample 50
   ./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
   ./replay-events | throttle --delay 50/s | ./slow-consumer
 `
@@ -63,6 +66,7 @@ type config struct {
 	burst    int64
 	summary  summaryMode
 	keepLast bool
+	sample   int64
 	delay    bool
 	buffer   int
 
@@ -115,6 +119,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&summary, "summary", "stderr", "")
 	fs.BoolVar(&noSummary, "no-summary", false, "")
 	fs.BoolVar(&cfg.keepLast, "keep-last", false, "")
+	fs.Int64Var(&cfg.sample, "sample", 0, "")
 	fs.BoolVar(&cfg.delay, "delay", false, "")
 	fs.IntVar(&cfg.buffer, "buffer", defaultBuffer, "")
 	fs.BoolVar(&cfg.showVersion, "version", false, "")
@@ -189,9 +194,15 @@ func parseArgs(args []string) (config, error) {
 		cfg.summary = summaryOff
 	}
 
+	if set["sample"] && cfg.sample < 2 {
+		return cfg, errors.New("--sample must be at least 2")
+	}
 	if cfg.delay {
 		if cfg.keepLast {
 			return cfg, errors.New("--keep-last can't be used with --delay")
+		}
+		if cfg.sample > 0 {
+			return cfg, errors.New("--sample can't be used with --delay")
 		}
 		if cfg.buffer < 0 {
 			return cfg, errors.New("--buffer must be 0 or more")

@@ -22,6 +22,7 @@ type throttler struct {
 	windowStart time.Time
 	windowDrops int64
 	lastDropped []byte // the newest line, if it was dropped (--keep-last only)
+	overRate    int64  // lines that found the bucket empty (for --sample)
 	queue       queue  // lines waiting to be released (--delay only)
 
 	seen    int64
@@ -57,6 +58,13 @@ func (t *throttler) Line(line []byte) error {
 		return t.enqueue(line)
 	}
 	if t.bucket.Allow() {
+		t.lastDropped = nil
+		return t.emit(line)
+	}
+	// Over the rate. With --sample every Kth such line still gets through;
+	// the count runs across windows so a steady overload samples steadily.
+	t.overRate++
+	if t.cfg.sample > 0 && t.overRate%t.cfg.sample == 0 {
 		t.lastDropped = nil
 		return t.emit(line)
 	}
