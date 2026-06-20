@@ -7,17 +7,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 const usage = `Usage: throttle [flags] RATE
 
 Copy lines from stdin to stdout, letting at most RATE through and dropping
 the rest (or, with --delay, holding them back). At the end of each period in
 which lines were dropped, a summary is written to stderr, and a final total
-is written when input ends.
+is written when input ends or throttle is interrupted.
 
 RATE is COUNT or COUNT/PERIOD:
   30          30 lines per minute
@@ -74,10 +76,14 @@ type config struct {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, stop))
 }
 
-func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// run is the whole command. A signal on stop ends it early, after the
+// final summary, with the exit status of a process killed by that signal.
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, stop <-chan os.Signal) int {
 	cfg, err := parseArgs(args)
 	switch {
 	case errors.Is(err, flag.ErrHelp):
@@ -92,7 +98,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	t := newThrottler(cfg, realClock{}, stdout, stderr)
-	err = pump(t, stdin)
+	sig, err := pump(t, stdin, stop)
+	if sig != nil {
+		// A second signal should kill us outright if the final flush hangs
+		// on a stuck reader.
+		signal.Reset(os.Interrupt, syscall.SIGTERM)
+	}
 	if ferr := t.Finish(); err == nil {
 		err = ferr
 	}
@@ -100,7 +111,18 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "throttle: %v\n", err)
 		return 1
 	}
+	if sig != nil {
+		return signalStatus(sig)
+	}
 	return 0
+}
+
+// signalStatus is the shell's exit status for a process ended by sig.
+func signalStatus(sig os.Signal) int {
+	if s, ok := sig.(syscall.Signal); ok {
+		return 128 + int(s)
+	}
+	return 1
 }
 
 // parseArgs parses the command line. Flags may appear before or after RATE.

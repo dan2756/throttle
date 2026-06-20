@@ -109,6 +109,22 @@ like any others. Use `--buffer 0` to queue without limit, for example when
 replaying a file whose every line must come out. When input ends,
 `throttle` keeps going until the queue is empty.
 
+### Stopping
+
+On Ctrl-C (SIGINT) or SIGTERM, `throttle` stops reading, emits any line held
+for `--keep-last`, and prints the total before exiting. With `--delay`,
+lines still waiting in the queue are discarded and counted as dropped. A
+second signal while that final summary is being written kills it at once.
+
+## Exit status
+
+| Code | Meaning                                         |
+| ---- | ----------------------------------------------- |
+| 0    | Input ended and everything was written.         |
+| 1    | A read or write error.                          |
+| 2    | Bad usage: unknown flag, invalid rate, etc.     |
+| 130  | Interrupted by SIGINT (143 for SIGTERM).        |
+
 ## Examples
 
 ```

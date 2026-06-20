@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -91,7 +93,7 @@ func TestParseArgsHelpAndVersion(t *testing.T) {
 func runThrottle(t *testing.T, stdin io.Reader, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code = run(args, stdin, &out, &errOut)
+	code = run(args, stdin, &out, &errOut, nil)
 	return out.String(), errOut.String(), code
 }
 
@@ -180,6 +182,64 @@ func TestEndToEndDelay(t *testing.T) {
 	// Five lines paced 5ms apart can't all be out in under 20ms.
 	if elapsed < 20*time.Millisecond {
 		t.Errorf("finished in %v; lines were not paced", elapsed)
+	}
+}
+
+// interruptingReader returns its data on the first Read. On the next one,
+// by which time every line of the data has been handed to the main loop,
+// it sends sig and then blocks until the test ends, like a terminal that
+// someone pressed Ctrl-C in.
+type interruptingReader struct {
+	data string
+	sig  os.Signal
+	stop chan os.Signal
+	done chan struct{}
+	read bool
+}
+
+func newInterruptingReader(t *testing.T, data string, sig os.Signal) *interruptingReader {
+	r := &interruptingReader{data: data, sig: sig, stop: make(chan os.Signal, 1), done: make(chan struct{})}
+	t.Cleanup(func() { close(r.done) })
+	return r
+}
+
+func (r *interruptingReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		return copy(p, r.data), nil
+	}
+	r.stop <- r.sig
+	<-r.done
+	return 0, io.EOF
+}
+
+func TestInterruptPrintsTotal(t *testing.T) {
+	r := newInterruptingReader(t, numbered(10), syscall.SIGINT)
+	var out, errOut bytes.Buffer
+	code := run([]string{"3"}, r, &out, &errOut, r.stop)
+	if code != 130 {
+		t.Errorf("exit %d, want 130", code)
+	}
+	if out.String() != "1\n2\n3\n" {
+		t.Errorf("stdout %q", out.String())
+	}
+	if m := totalRE.FindStringSubmatch(errOut.String()); m == nil || m[1] != "7" || m[2] != "10" {
+		t.Errorf("stderr %q, want 7 of 10 dropped", errOut.String())
+	}
+}
+
+func TestTerminateDiscardsQueuedLines(t *testing.T) {
+	r := newInterruptingReader(t, numbered(4), syscall.SIGTERM)
+	var out, errOut bytes.Buffer
+	code := run([]string{"--delay", "1/h"}, r, &out, &errOut, r.stop)
+	if code != 143 {
+		t.Errorf("exit %d, want 143", code)
+	}
+	if out.String() != "1\n" {
+		t.Errorf("stdout %q", out.String())
+	}
+	if m := totalRE.FindStringSubmatch(errOut.String()); m == nil || m[1] != "3" || m[2] != "4" {
+		t.Errorf("stderr %q, want 3 of 4 dropped", errOut.String())
 	}
 }
 
