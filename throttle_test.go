@@ -193,6 +193,14 @@ func TestWindowsStayAlignedAfterLateTick(t *testing.T) {
 	}
 }
 
+func TestUnterminatedLineGetsANewline(t *testing.T) {
+	h := newHarness(t, "5", "--summary", "stdout")
+	if err := h.th.Line([]byte("no newline")); err != nil {
+		t.Fatal(err)
+	}
+	h.wantOut(lines("no newline"))
+}
+
 func TestFinishReportsTotal(t *testing.T) {
 	h := newHarness(t, "2")
 	for range 10 {

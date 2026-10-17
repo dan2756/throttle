@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const version = "0.6.0"
+const version = "0.6.1"
 
 const usage = `Usage: throttle [flags] RATE
 
@@ -48,7 +48,10 @@ Examples:
   journalctl -f | throttle 5/s --keep-last
   ./load-test | throttle 100/s --sample 50
   ./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
-  ./replay-events | throttle --delay 50/s | ./slow-consumer
+  throttle --delay 50/s --buffer 0 < events.jsonl | ./slow-consumer
+
+Exit status is 0 at end of input, 1 on a read or write error, 2 on bad
+usage, and 128+N when stopped by signal N (130 for Ctrl-C).
 `
 
 const defaultBuffer = 10000
@@ -76,8 +79,17 @@ type config struct {
 }
 
 func main() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigs
+		// Only the first signal is handled. Finishing up can hang on a
+		// reader that has stopped reading, and run can't take a signal
+		// while it is blocked writing, so a second one kills us outright.
+		signal.Reset(os.Interrupt, syscall.SIGTERM)
+		stop <- sig
+	}()
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, stop))
 }
 
@@ -99,11 +111,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, stop <-chan o
 
 	t := newThrottler(cfg, realClock{}, stdout, stderr)
 	sig, err := pump(t, stdin, stop)
-	if sig != nil {
-		// A second signal should kill us outright if the final flush hangs
-		// on a stuck reader.
-		signal.Reset(os.Interrupt, syscall.SIGTERM)
-	}
 	if ferr := t.Finish(); err == nil {
 		err = ferr
 	}

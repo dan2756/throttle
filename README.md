@@ -8,6 +8,16 @@ out the other side; the rest are dropped, and you're told how many. Or, with
 for chatty logs, runaway debug output, replaying events into something slow,
 or anything you want to watch without drowning in it.
 
+```
+$ seq 1 1000 | throttle 5
+1
+2
+3
+4
+5
+[throttle] total: dropped 995 of 1,000 lines over 1ms
+```
+
 ## Install
 
 ```
@@ -47,7 +57,8 @@ duration (`1h30m`).
 | `-h`, `--help`   | Show help.                                                      |
 | `--version`      | Print the version.                                              |
 
-Flags can go before or after the rate.
+Flags can go before or after the rate. `--keep-last` and `--sample` apply
+only to the default drop mode and can't be combined with `--delay`.
 
 ### How the limit works
 
@@ -76,7 +87,8 @@ minutes. When input ends, a total follows if anything was dropped:
 
 Summaries go to stderr so they never mix with the data, unless you ask for
 `--summary stdout`, which is handy when the output is a terminal or a file
-you'll read later.
+you'll read later. Every summary starts with `[throttle]`, so
+`grep -v '^\[throttle\]'` strips them again.
 
 ### Keeping the newest line
 
@@ -109,12 +121,43 @@ like any others. Use `--buffer 0` to queue without limit, for example when
 replaying a file whose every line must come out. When input ends,
 `throttle` keeps going until the queue is empty.
 
+### Input and output
+
+Output is line-buffered: each line is written as soon as it passes, so
+`throttle` works at the end of a live pipeline. Lines can be any length
+(there is no 64K limit), and the bytes of a line are passed through
+untouched. A final line with no trailing newline is written with one added.
+
 ### Stopping
 
 On Ctrl-C (SIGINT) or SIGTERM, `throttle` stops reading, emits any line held
 for `--keep-last`, and prints the total before exiting. With `--delay`,
-lines still waiting in the queue are discarded and counted as dropped. A
-second signal while that final summary is being written kills it at once.
+lines still waiting in the queue are discarded and counted as dropped.
+Lines read before the signal are still passed on, so if whatever reads
+the output has stopped reading, `throttle` waits for it. A second signal
+kills it at once, whatever it is doing.
+
+## Examples
+
+```sh
+# Watch a busy log without it scrolling past faster than you can read.
+tail -f app.log | throttle 30
+
+# Five lines a second, always showing where things ended up.
+journalctl -f | throttle 5/s --keep-last
+
+# A short burst, then at most 100 lines every 10 seconds.
+./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
+
+# Keep a record of a chatty service, with the gaps marked inline.
+kubectl logs -f deploy/api | throttle 60 --summary stdout > api.log
+
+# A load test's errors: the first 100 a second, then 1 in 50 of the rest.
+./load-test 2>&1 | throttle 100/s --sample 50
+
+# Feed a slow consumer a steady 50 lines a second without losing any.
+throttle --delay 50/s --buffer 0 < events.jsonl | ./slow-consumer
+```
 
 ## Exit status
 
@@ -125,16 +168,12 @@ second signal while that final summary is being written kills it at once.
 | 2    | Bad usage: unknown flag, invalid rate, etc.     |
 | 130  | Interrupted by SIGINT (143 for SIGTERM).        |
 
-## Examples
+## Platform notes
 
-```
-tail -f app.log | throttle 30
-journalctl -f | throttle 5/s --keep-last
-./noisy-job 2>&1 | throttle 100 --per 10s --burst 20
-kubectl logs -f deploy/api | throttle 60 --summary stdout > api.log
-./load-test 2>&1 | throttle 100/s --sample 50
-./replay-events < events.jsonl | throttle --delay 50/s --buffer 0 | ./slow-consumer
-```
+`throttle` is plain Go with no dependencies outside the standard library and
+behaves the same on Linux and macOS. It has no config file and reads no
+environment variables. If whatever reads its output goes away (say,
+`| head`), it exits quietly on SIGPIPE like other filters.
 
 ## License
 

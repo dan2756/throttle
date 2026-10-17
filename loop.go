@@ -27,16 +27,20 @@ func (s *lineSource) read(r io.Reader) {
 	// through whole; the buffer size only affects how much is read at once.
 	br := bufio.NewReaderSize(r, 64<<10)
 	for {
+		// ReadBytes returns what it has along with the error, which at EOF
+		// is a final line that has no newline. Hand that over too.
 		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			select {
+			case s.lines <- line:
+			case <-s.done:
+				return
+			}
+		}
 		if err != nil {
 			if err != io.EOF {
 				s.err = err
 			}
-			return
-		}
-		select {
-		case s.lines <- line:
-		case <-s.done:
 			return
 		}
 	}

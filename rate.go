@@ -66,7 +66,8 @@ func parsePeriod(s string) (time.Duration, error) {
 		if f <= 0 {
 			return 0, fmt.Errorf("period %q must be positive", s)
 		}
-		if f < 1 || f > math.MaxInt64 {
+		// MaxInt64 rounds up to 2^63 as a float64, which is already too big.
+		if f < 1 || f >= math.MaxInt64 {
 			return 0, fmt.Errorf("period %q out of range", s)
 		}
 		return time.Duration(f), nil

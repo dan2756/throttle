@@ -41,9 +41,12 @@ func formatDuration(d time.Duration) string {
 }
 
 // roundElapsed rounds a run time to a precision that reads well in a
-// summary: milliseconds under a second, tenths under a minute, else seconds.
+// summary: microseconds under a millisecond, milliseconds under a second,
+// tenths under a minute, else whole seconds.
 func roundElapsed(d time.Duration) time.Duration {
 	switch {
+	case d < time.Millisecond:
+		return d.Round(time.Microsecond)
 	case d < time.Second:
 		return d.Round(time.Millisecond)
 	case d < time.Minute:

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"syscall"
@@ -143,7 +144,29 @@ func TestEndToEndUnderRateIsSilent(t *testing.T) {
 	}
 }
 
+func TestEndToEndUnterminatedLastLine(t *testing.T) {
+	tests := []struct {
+		in   string
+		args []string
+		want string
+	}{
+		{"a\nb\nc", []string{"5"}, "a\nb\nc\n"},
+		{"only", []string{"5"}, "only\n"},
+		{"a\nb\nc", []string{"1", "--keep-last", "--no-summary"}, "a\nc\n"},
+		{"a\nb", []string{"--delay", "1000/s"}, "a\nb\n"},
+		{"a\nb\nc\nd", []string{"2", "--keep-last", "--summary", "stdout"}, "a\nb\nd\n[throttle] total: dropped 1 of 4 lines over "},
+	}
+	for _, tt := range tests {
+		out, errOut, code := runThrottle(t, strings.NewReader(tt.in), tt.args...)
+		if code != 0 || !strings.HasPrefix(out, tt.want) {
+			t.Errorf("%q with %q: exit %d, stdout %q, stderr %q; want stdout %q",
+				tt.in, tt.args, code, out, errOut, tt.want)
+		}
+	}
+}
+
 func TestEndToEndLongLines(t *testing.T) {
+	// Well past bufio.Scanner's 64K default token limit.
 	long1 := strings.Repeat("a", 200_000)
 	long2 := strings.Repeat("b", 1<<20)
 	in := long1 + "\n" + long2 + "\nshort\n"
@@ -240,6 +263,44 @@ func TestTerminateDiscardsQueuedLines(t *testing.T) {
 	}
 	if m := totalRE.FindStringSubmatch(errOut.String()); m == nil || m[1] != "3" || m[2] != "4" {
 		t.Errorf("stderr %q, want 3 of 4 dropped", errOut.String())
+	}
+}
+
+// TestMain lets the test binary stand in for throttle itself, so that a
+// test can run it as a process and send it real signals.
+func TestMain(m *testing.M) {
+	if os.Getenv("THROTTLE_TEST_RUN_MAIN") == "1" {
+		main()
+	}
+	os.Exit(m.Run())
+}
+
+func TestSecondSignalKillsWhileOutputBlocked(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "1000000/s")
+	cmd.Env = append(os.Environ(), "THROTTLE_TEST_RUN_MAIN=1")
+	cmd.Stdin = strings.NewReader(numbered(100_000))
+	// Never read, so the pipe fills up and throttle blocks writing to it.
+	if _, err := cmd.StdoutPipe(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	time.Sleep(200 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	cmd.Process.Signal(syscall.SIGTERM) // it may be gone already
+
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("still running after two signals while its output was blocked")
 	}
 }
 

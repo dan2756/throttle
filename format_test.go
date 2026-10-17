@@ -58,6 +58,7 @@ func TestFormatDuration(t *testing.T) {
 
 func TestRoundElapsed(t *testing.T) {
 	tests := map[time.Duration]time.Duration{
+		312345 * time.Nanosecond:                              312 * time.Microsecond,
 		1234567 * time.Nanosecond:                             1 * time.Millisecond,
 		4249 * time.Millisecond:                               4200 * time.Millisecond,
 		59960 * time.Millisecond:                              time.Minute,

@@ -55,6 +55,9 @@ func TestParseRateErrors(t *testing.T) {
 		{"5/0", "must be positive"},
 		{"5/-1m", "must be positive"},
 		{"5/1..5s", "invalid period"},
+		{"5/106752d", "out of range"},
+		{"5/106751.99116730064d", "out of range"},   // exactly 2^63ns as a float64
+		{"5/9223372036.854775807s", "out of range"}, // likewise
 	}
 	for _, tt := range tests {
 		_, _, err := parseRate(tt.in)

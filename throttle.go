@@ -188,10 +188,17 @@ func (t *throttler) takeLast() []byte {
 	return line
 }
 
-// emit writes a line and flushes it, keeping the output line-buffered.
+// emit writes a line and flushes it, keeping the output line-buffered. A
+// last line that arrived without a newline gets one, so anything written
+// after it (a summary, a kept line) starts on a line of its own.
 func (t *throttler) emit(line []byte) error {
 	if _, err := t.out.Write(line); err != nil {
 		return err
+	}
+	if len(line) == 0 || line[len(line)-1] != '\n' {
+		if err := t.out.WriteByte('\n'); err != nil {
+			return err
+		}
 	}
 	return t.out.Flush()
 }
