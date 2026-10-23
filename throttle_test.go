@@ -331,6 +331,85 @@ type errWriter struct{ err error }
 
 func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
 
+// linesThenErr accepts n newline-terminated writes, then fails.
+type linesThenErr struct {
+	n   int
+	buf bytes.Buffer
+}
+
+func (w *linesThenErr) Write(p []byte) (int, error) {
+	if w.n <= 0 {
+		return 0, errors.New("disk full")
+	}
+	w.n -= bytes.Count(p, []byte("\n"))
+	return w.buf.Write(p)
+}
+
+func TestFailedWriteStaysInTheDropCount(t *testing.T) {
+	cfg, err := parseArgs([]string{"5", "--no-summary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &linesThenErr{n: 1}
+	th := newThrottler(cfg, newFakeClock(), out, &bytes.Buffer{})
+	if err := th.Line([]byte("a\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := th.Line([]byte("b\n")); err == nil {
+		t.Fatal("expected the second line's write to fail")
+	}
+	if th.seen != 2 || th.dropped != 1 || out.buf.String() != "a\n" {
+		t.Fatalf("seen %d dropped %d out %q", th.seen, th.dropped, out.buf.String())
+	}
+}
+
+func TestFailedDelayWriteStaysInTheDropCount(t *testing.T) {
+	cfg, err := parseArgs([]string{"--delay", "1/s", "--buffer", "1", "--no-summary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := newFakeClock()
+	out := &linesThenErr{n: 1}
+	th := newThrottler(cfg, clock, out, &bytes.Buffer{})
+	for _, l := range []string{"a", "b", "c"} {
+		if err := th.Line([]byte(l + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock.Advance(time.Second)
+	if err := th.Tick(); err == nil {
+		t.Fatal("expected the queued line's write to fail")
+	}
+	// a was written, b was dropped to make room, c was popped and failed to write.
+	if th.seen != 3 || th.dropped != 2 || out.buf.String() != "a\n" {
+		t.Fatalf("seen %d dropped %d out %q", th.seen, th.dropped, out.buf.String())
+	}
+}
+
+func TestFailedKeepLastWriteStaysInTheDropCount(t *testing.T) {
+	cfg, err := parseArgs([]string{"1", "--keep-last", "--no-summary"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := newFakeClock()
+	out := &linesThenErr{n: 1}
+	var notes bytes.Buffer
+	th := newThrottler(cfg, clock, out, &notes)
+	if err := th.Line([]byte("a\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := th.Line([]byte("b\n")); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	if err := th.Finish(); err == nil {
+		t.Fatal("expected the kept line's write to fail")
+	}
+	if th.seen != 2 || th.dropped != 1 || out.buf.String() != "a\n" || notes.Len() != 0 {
+		t.Fatalf("seen %d dropped %d out %q notes %q", th.seen, th.dropped, out.buf.String(), notes.String())
+	}
+}
+
 func TestWindowSummaryWriteError(t *testing.T) {
 	cfg, err := parseArgs([]string{"1"})
 	if err != nil {

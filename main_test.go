@@ -311,6 +311,14 @@ func TestEndToEndReadError(t *testing.T) {
 	}
 }
 
+func TestEndToEndWriteError(t *testing.T) {
+	var errOut bytes.Buffer
+	code := run([]string{"10"}, strings.NewReader("a\nb\n"), errWriter{errors.New("disk full")}, &errOut, nil)
+	if code != 1 || !strings.Contains(errOut.String(), "disk full") {
+		t.Fatalf("exit %d, stderr %q", code, errOut.String())
+	}
+}
+
 func TestSummaryWriteErrorExitsOne(t *testing.T) {
 	var out bytes.Buffer
 	// The line that passes is written; the total on stderr cannot be.

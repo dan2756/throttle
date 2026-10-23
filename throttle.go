@@ -59,14 +59,14 @@ func (t *throttler) Line(line []byte) error {
 	}
 	if t.bucket.Allow() {
 		t.lastDropped = nil
-		return t.emit(line)
+		return t.deliver(line)
 	}
 	// Over the rate. With --sample every Kth such line still gets through;
 	// the count runs across windows so a steady overload samples steadily.
 	t.overRate++
 	if t.cfg.sample > 0 && t.overRate%t.cfg.sample == 0 {
 		t.lastDropped = nil
-		return t.emit(line)
+		return t.deliver(line)
 	}
 	t.drop()
 	if t.cfg.keepLast {
@@ -89,7 +89,7 @@ func (t *throttler) enqueue(line []byte) error {
 // release emits queued lines for as long as the bucket has tokens.
 func (t *throttler) release() error {
 	for t.queue.len() > 0 && t.bucket.Allow() {
-		if err := t.emit(t.queue.pop()); err != nil {
+		if err := t.deliver(t.queue.pop()); err != nil {
 			return err
 		}
 	}
@@ -132,20 +132,23 @@ func (t *throttler) Finish() error {
 		t.dropped += int64(n)
 		t.queue = queue{}
 	}
+	var writeErr error
 	if line := t.takeLast(); line != nil {
-		if err := t.emit(line); err != nil {
-			return err
+		if err := t.deliver(line); err != nil {
+			writeErr = err
 		}
 	}
 	if t.dropped > 0 {
 		elapsed := roundElapsed(t.clock.Now().Sub(t.start))
 		if err := t.note("total: dropped %s of %s over %s",
-			commas(t.dropped), plural(t.seen, "line"), formatDuration(elapsed)); err != nil {
-			t.out.Flush()
-			return err
+			commas(t.dropped), plural(t.seen, "line"), formatDuration(elapsed)); err != nil && writeErr == nil {
+			writeErr = err
 		}
 	}
-	return t.out.Flush()
+	if err := t.out.Flush(); err != nil && writeErr == nil {
+		writeErr = err
+	}
+	return writeErr
 }
 
 func (t *throttler) advance() error {
@@ -172,7 +175,7 @@ func (t *throttler) closeWindow() error {
 		}
 	}
 	if kept != nil {
-		if err := t.emit(kept); err != nil {
+		if err := t.deliver(kept); err != nil {
 			return err
 		}
 	} else if err := t.out.Flush(); err != nil {
@@ -196,6 +199,17 @@ func (t *throttler) takeLast() []byte {
 		t.dropped--
 	}
 	return line
+}
+
+// deliver writes a line that is leaving the limiter. If the write fails the
+// line is counted as dropped, so it cannot vanish from both the output and
+// the summary.
+func (t *throttler) deliver(line []byte) error {
+	if err := t.emit(line); err != nil {
+		t.drop()
+		return err
+	}
+	return nil
 }
 
 // emit writes a line and flushes it, keeping the output line-buffered. A
