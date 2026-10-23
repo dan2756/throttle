@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"testing/iotest"
@@ -248,6 +249,114 @@ func TestInterruptPrintsTotal(t *testing.T) {
 	}
 	if m := totalRE.FindStringSubmatch(errOut.String()); m == nil || m[1] != "7" || m[2] != "10" {
 		t.Errorf("stderr %q, want 7 of 10 dropped", errOut.String())
+	}
+}
+
+// blockWriter blocks in its first Write until unblock is closed.
+type blockWriter struct {
+	buf     bytes.Buffer
+	mu      sync.Mutex
+	entered chan struct{}
+	unblock chan struct{}
+	once    sync.Once
+}
+
+func (w *blockWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.unblock
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// chunkReader returns data on the first Read, then blocks until done.
+type chunkReader struct {
+	data []byte
+	done chan struct{}
+	read bool
+}
+
+func (r *chunkReader) Read(p []byte) (int, error) {
+	if !r.read {
+		r.read = true
+		return copy(p, r.data), nil
+	}
+	<-r.done
+	return 0, io.EOF
+}
+
+func TestInterruptDeliversLinesAlreadyRead(t *testing.T) {
+	const n = 2000
+	var b strings.Builder
+	for range n {
+		b.WriteString("x\n")
+	}
+	r := &chunkReader{data: []byte(b.String()), done: make(chan struct{})}
+	t.Cleanup(func() { close(r.done) })
+	out := &blockWriter{entered: make(chan struct{}), unblock: make(chan struct{})}
+	stop := make(chan os.Signal, 1)
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{"1000000/s", "--no-summary"}, r, out, io.Discard, stop)
+	}()
+	select {
+	case <-out.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("never started writing")
+	}
+	stop <- syscall.SIGINT
+	close(out.unblock)
+	select {
+	case code := <-done:
+		if code != 130 {
+			t.Fatalf("exit %d, want 130", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out delivering lines already read")
+	}
+	out.mu.Lock()
+	got := out.buf.String()
+	out.mu.Unlock()
+	if got != strings.Repeat("x\n", n) {
+		t.Fatalf("got %d lines, want %d", strings.Count(got, "\n"), n)
+	}
+}
+
+// blockingReader blocks in Read until done is closed. entered is closed
+// once that Read has begun.
+type blockingReader struct {
+	done    chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.done
+	return 0, io.EOF
+}
+
+func TestInterruptWhileWaitingForInput(t *testing.T) {
+	r := &blockingReader{done: make(chan struct{}), entered: make(chan struct{})}
+	t.Cleanup(func() { close(r.done) })
+	stop := make(chan os.Signal, 1)
+	done := make(chan int, 1)
+	go func() {
+		done <- run([]string{"10"}, r, io.Discard, io.Discard, stop)
+	}()
+	select {
+	case <-r.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("never blocked on input")
+	}
+	stop <- syscall.SIGINT
+	select {
+	case code := <-done:
+		if code != 130 {
+			t.Fatalf("exit %d, want 130", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("interrupt while waiting for input hung")
 	}
 }
 
