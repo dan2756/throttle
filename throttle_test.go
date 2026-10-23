@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -324,6 +325,34 @@ func TestSampleCountCarriesAcrossWindows(t *testing.T) {
 	h.advance(time.Minute)
 	h.feed("d", "e", "f")
 	h.wantOut(lines("a", "c", "d", "f"))
+}
+
+type errWriter struct{ err error }
+
+func (w errWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestWindowSummaryWriteError(t *testing.T) {
+	cfg, err := parseArgs([]string{"1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := newFakeClock()
+	var out bytes.Buffer
+	th := newThrottler(cfg, clock, &out, errWriter{errors.New("closed")})
+	if err := th.Line([]byte("a\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := th.Line([]byte("b\n")); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Minute)
+	err = th.Tick()
+	if err == nil || !strings.Contains(err.Error(), "closed") {
+		t.Fatalf("Tick err = %v, want the summary write error", err)
+	}
+	if out.String() != "a\n" {
+		t.Fatalf("stdout %q", out.String())
+	}
 }
 
 func TestSampleWithKeepLast(t *testing.T) {
