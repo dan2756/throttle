@@ -311,6 +311,15 @@ func TestEndToEndReadError(t *testing.T) {
 	}
 }
 
+func TestSummaryWriteErrorExitsOne(t *testing.T) {
+	var out bytes.Buffer
+	// The line that passes is written; the total on stderr cannot be.
+	code := run([]string{"1"}, strings.NewReader("a\nb\n"), &out, errWriter{errors.New("closed")}, nil)
+	if code != 1 || out.String() != "a\n" {
+		t.Fatalf("exit %d, stdout %q; want 1 and the line that passed", code, out.String())
+	}
+}
+
 func TestRunUsage(t *testing.T) {
 	out, _, code := runThrottle(t, strings.NewReader(""), "-h")
 	if code != 0 || !strings.Contains(out, "Usage: throttle") {

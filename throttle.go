@@ -139,8 +139,11 @@ func (t *throttler) Finish() error {
 	}
 	if t.dropped > 0 {
 		elapsed := roundElapsed(t.clock.Now().Sub(t.start))
-		t.note("total: dropped %s of %s over %s",
-			commas(t.dropped), plural(t.seen, "line"), formatDuration(elapsed))
+		if err := t.note("total: dropped %s of %s over %s",
+			commas(t.dropped), plural(t.seen, "line"), formatDuration(elapsed)); err != nil {
+			t.out.Flush()
+			return err
+		}
 	}
 	return t.out.Flush()
 }
@@ -161,14 +164,21 @@ func (t *throttler) advance() error {
 // window never ends with the output showing stale data.
 func (t *throttler) closeWindow() error {
 	kept := t.takeLast()
+	var nerr error
 	if t.windowDrops > 0 {
-		t.note("dropped %s in the last %s", plural(t.windowDrops, "line"), formatDuration(t.cfg.period))
-		t.windowDrops = 0
+		nerr = t.note("dropped %s in the last %s", plural(t.windowDrops, "line"), formatDuration(t.cfg.period))
+		if nerr == nil {
+			t.windowDrops = 0
+		}
 	}
 	if kept != nil {
-		return t.emit(kept)
+		if err := t.emit(kept); err != nil {
+			return err
+		}
+	} else if err := t.out.Flush(); err != nil {
+		return err
 	}
-	return t.out.Flush()
+	return nerr
 }
 
 func (t *throttler) drop() {
@@ -204,8 +214,10 @@ func (t *throttler) emit(line []byte) error {
 }
 
 // note writes a summary line, unless summaries are off.
-func (t *throttler) note(format string, args ...any) {
-	if t.notes != nil {
-		fmt.Fprintf(t.notes, "[throttle] "+format+"\n", args...)
+func (t *throttler) note(format string, args ...any) error {
+	if t.notes == nil {
+		return nil
 	}
+	_, err := fmt.Fprintf(t.notes, "[throttle] "+format+"\n", args...)
+	return err
 }
